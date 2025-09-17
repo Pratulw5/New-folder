@@ -143,3 +143,23 @@ for epoch in range(epochs):
     
     print(f"Epoch {epoch+1}, Loss: {train_loss/len(dataset):.4f}")
 
+# Save Model 2D latent space sampling and visualization
+import numpy as np
+
+n = 20
+grid_x = np.linspace(-3, 3, n)
+grid_y = np.linspace(-3, 3, n)
+
+model.eval()
+figure = np.zeros((64*n, 64*n))
+for i, xi in enumerate(grid_x):
+    for j, yi in enumerate(grid_y):
+        z = torch.tensor([[xi, yi]], dtype=torch.float32).to(device)
+        recon = model.decode(z).cpu().detach().numpy()
+        recon = recon[0,0]
+        figure[i*64:(i+1)*64, j*64:(j+1)*64] = recon
+
+plt.figure(figsize=(10, 10))
+plt.imshow(figure, cmap='gray')
+plt.axis('off')
+plt.show()
