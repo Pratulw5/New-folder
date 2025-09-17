@@ -63,3 +63,56 @@ dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
 #The dataloader provides batches of preprocessed tensors (your MRI slices) to your model during training or inference. You loop over the dataloader in your training code to feed data into your neural network.
 
 
+
+# This class builds a VAE that compresses images to a low-dimensional latent space and reconstructs them, using convolutional layers for both encoding and decoding.
+class VAE(nn.Module):
+    def __init__(self, latent_dim=2):
+        super(VAE, self).__init__()
+        self.latent_dim = latent_dim
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 32, 4, 2, 1),  # 64x64 -> 32x32
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2, 1),  # 32x32 -> 16x16
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2, 1),  # 16x16 -> 8x8
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        self.fc_mu = nn.Linear(128*8*8, latent_dim)
+        self.fc_logvar = nn.Linear(128*8*8, latent_dim)
+        
+        # Decoder
+        self.decoder_input = nn.Linear(latent_dim, 128*8*8)
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),  # 8x8 -> 16x16
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 4, 2, 1),  # 16x16 -> 32x32
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 1, 4, 2, 1),  # 32x32 -> 64x64
+            nn.Sigmoid()
+        )
+        
+    def encode(self, x):
+        x_enc = self.encoder(x)
+        mu = self.fc_mu(x_enc)
+        logvar = self.fc_logvar(x_enc)
+        return mu, logvar
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z):
+        x = self.decoder_input(z)
+        x = x.view(-1, 128, 8, 8)
+        x = self.decoder(x)
+        return x
+    
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        x_recon = self.decode(z)
+        return x_recon, mu, logvar
