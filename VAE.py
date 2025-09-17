@@ -1,70 +1,51 @@
 # Setup and Imports
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
 import os
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from torchvision.utils import save_image
 import matplotlib.pyplot as plt
-import nibabel as nib  # For MRI NIfTI files
-import umap
+import numpy as np
 
-
-# Preprocess and Load MRI Data
-class MRIDataset(Dataset): #custom pytorch dataset class for MRI data
-    def __init__(self, root_dir, transform=None): #init method to initialize dataset
+# -------------------------
+# Dataset
+# -------------------------
+class MRIDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
+        self.files = [f for f in os.listdir(root_dir) if f.endswith(".png")]
         self.transform = transform
-        self.files = [f for f in os.listdir(root_dir) if f.endswith(('.nii', '.nii.gz'))]
 
-    def __len__(self): #return the length of the dataset
+    def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx):# get item method to get a single MRI file
-        #idx is the index of the MRI file to retrieve
-        file_path = os.path.join(self.root_dir, self.files[idx])
-        #load the MRI file using nibabel
-        img = nib.load(file_path).get_fdata()
-        
-        # Take a central slice from the 3D volume along the 3d z-axis
-        img = img[:, :, img.shape[2] // 2]
-        
-        # Converts the slice to float32 and normalizes pixel values to [0, 1].
-        img = img.astype(np.float32)
-    
-        img = (img - img.min()) / (img.max() - img.min())  # Normalize 0-1
-        
-        #Applies any provided transform (e.g., resizing, tensor conversion).
-        # None in this case, but can be set to transforms.Compose([...])
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.root_dir, self.files[idx])
+        image = Image.open(img_path).convert("L")  # grayscale
         if self.transform:
-            img = self.transform(img)
+            image = self.transform(image)
+        return image
 
-        return img.unsqueeze(0)  # add channel dimension
-    #In image processing with PyTorch, the channel dimension refers to the part of a tensor that represents color channels (like Red, Green, Blue) or, for grayscale images, a single channel.
-
-# Directory path
-dataset_dir = "/home/groups/comp3710/OASIS_Preprocessed/"
-
-#Composed of:
-# ToTensor(): Converts the image to a PyTorch tensor.
-# Resize((64, 64)): Resizes the image to 64x64 pixels.
+# Transform: Resize to 64x64 to match VAE architecture
 transform = transforms.Compose([
+    transforms.Resize((64,64)),
     transforms.ToTensor(),
-    transforms.Resize((64, 64)),  
+    transforms.Normalize((0.5,), (0.5,))
 ])
 
-# An instance of MRIDataset with the specified directory and transform.
-dataset = MRIDataset(dataset_dir, transform=transform)
+train_dataset = MRIDataset("/home/groups/comp3710/OASIS/keras_png_slices_train", transform=transform)
+val_dataset   = MRIDataset("/home/groups/comp3710/OASIS/keras_png_slices_validate", transform=transform)
+test_dataset  = MRIDataset("/home/groups/comp3710/OASIS/keras_png_slices_test", transform=transform)
 
-# Wraps the dataset for batch loading (batch size 16, shuffling enabled).
-dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
-#The dataloader provides batches of preprocessed tensors (your MRI slices) to your model during training or inference. You loop over the dataloader in your training code to feed data into your neural network.
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader   = DataLoader(val_dataset, batch_size=64, shuffle=False)
+test_loader  = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-
-
-# This class builds a VAE that compresses images to a low-dimensional latent space and reconstructs them, using convolutional layers for both encoding and decoding.
+# -------------------------
+# VAE Model
+# -------------------------
 class VAE(nn.Module):
     def __init__(self, latent_dim=2):
         super(VAE, self).__init__()
@@ -72,11 +53,11 @@ class VAE(nn.Module):
         
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 32, 4, 2, 1),  # 64x64 -> 32x32
+            nn.Conv2d(1, 32, 4, 2, 1),  # 64 -> 32
             nn.ReLU(),
-            nn.Conv2d(32, 64, 4, 2, 1),  # 32x32 -> 16x16
+            nn.Conv2d(32, 64, 4, 2, 1), # 32 -> 16
             nn.ReLU(),
-            nn.Conv2d(64, 128, 4, 2, 1),  # 16x16 -> 8x8
+            nn.Conv2d(64, 128, 4, 2, 1), # 16 -> 8
             nn.ReLU(),
             nn.Flatten()
         )
@@ -86,11 +67,11 @@ class VAE(nn.Module):
         # Decoder
         self.decoder_input = nn.Linear(latent_dim, 128*8*8)
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),  # 8x8 -> 16x16
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),  # 8 -> 16
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, 2, 1),  # 16x16 -> 32x32
+            nn.ConvTranspose2d(64, 32, 4, 2, 1),  # 16 -> 32
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, 4, 2, 1),  # 32x32 -> 64x64
+            nn.ConvTranspose2d(32, 1, 4, 2, 1),   # 32 -> 64
             nn.Sigmoid()
         )
         
@@ -117,13 +98,17 @@ class VAE(nn.Module):
         x_recon = self.decode(z)
         return x_recon, mu, logvar
 
+# -------------------------
 # Loss Function
+# -------------------------
 def vae_loss(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='sum')
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kl_loss
 
+# -------------------------
 # Training Loop
+# -------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = VAE(latent_dim=2).to(device)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -132,7 +117,7 @@ epochs = 50
 for epoch in range(epochs):
     model.train()
     train_loss = 0
-    for imgs in dataloader:
+    for imgs in train_loader:
         imgs = imgs.to(device)
         optimizer.zero_grad()
         recon_imgs, mu, logvar = model(imgs)
@@ -141,17 +126,17 @@ for epoch in range(epochs):
         train_loss += loss.item()
         optimizer.step()
     
-    print(f"Epoch {epoch+1}, Loss: {train_loss/len(dataset):.4f}")
+    print(f"Epoch {epoch+1}, Loss: {train_loss/len(train_dataset):.4f}")
 
-# Save Model 2D latent space sampling and visualization
-import numpy as np
-
+# -------------------------
+# Visualization: 2D Latent Space
+# -------------------------
 n = 20
 grid_x = np.linspace(-3, 3, n)
 grid_y = np.linspace(-3, 3, n)
 
 model.eval()
-figure = np.zeros((64*n, 64*n))
+figure = np.zeros((64*n, 64*n))  # 64, since input is resized to 64x64
 for i, xi in enumerate(grid_x):
     for j, yi in enumerate(grid_y):
         z = torch.tensor([[xi, yi]], dtype=torch.float32).to(device)
